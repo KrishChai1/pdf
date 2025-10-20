@@ -89,40 +89,64 @@ class USCISFormExtractor:
             return {"error": "Docling not available"}
         
         try:
-            # Initialize DocumentConverter with PDF pipeline options
-            pipeline_options = PdfPipelineOptions()
-            pipeline_options.do_ocr = True
-            pipeline_options.do_table_structure = True
+            import tempfile
+            import os
+            from pathlib import Path
             
-            converter = DocumentConverter(
-                format_options={
-                    InputFormat.PDF: pipeline_options,
+            # Create a temporary file to save the uploaded content
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+                # Write the uploaded file content to temporary file
+                tmp_file.write(pdf_file.getvalue())
+                tmp_file_path = tmp_file.name
+            
+            try:
+                # Initialize DocumentConverter with PDF pipeline options
+                pipeline_options = PdfPipelineOptions()
+                pipeline_options.do_ocr = True
+                pipeline_options.do_table_structure = True
+                
+                converter = DocumentConverter(
+                    format_options={
+                        InputFormat.PDF: pipeline_options,
+                    }
+                )
+                
+                # Convert the PDF using the file path
+                result = converter.convert(Path(tmp_file_path))
+                
+                # Extract structured content
+                content = {
+                    "text": result.document.export_to_text(),
+                    "markdown": result.document.export_to_markdown(),
+                    "tables": [],
+                    "fields": []
                 }
-            )
-            
-            # Convert the PDF
-            result = converter.convert(pdf_file)
-            
-            # Extract structured content
-            content = {
-                "text": result.document.export_to_text(),
-                "markdown": result.document.export_to_markdown(),
-                "tables": [],
-                "fields": []
-            }
-            
-            # Extract tables if any
-            for table in result.document.tables:
-                content["tables"].append({
-                    "data": table.export_to_dataframe().to_dict(),
-                    "bbox": table.bbox if hasattr(table, 'bbox') else None
-                })
-            
-            return content
+                
+                # Extract tables if any
+                if hasattr(result.document, 'tables') and result.document.tables:
+                    for table in result.document.tables:
+                        try:
+                            table_data = {
+                                "data": table.export_to_dataframe().to_dict(),
+                                "bbox": table.bbox if hasattr(table, 'bbox') else None
+                            }
+                            content["tables"].append(table_data)
+                        except Exception as table_error:
+                            self.debug_info.append(f"Error extracting table: {str(table_error)}")
+                
+                return content
+                
+            finally:
+                # Clean up temporary file
+                try:
+                    os.unlink(tmp_file_path)
+                except Exception:
+                    pass  # Ignore cleanup errors
             
         except Exception as e:
-            st.error(f"Error extracting with Docling: {str(e)}")
-            return {"error": str(e)}
+            error_msg = f"Error extracting with Docling: {str(e)}"
+            self.debug_info.append(error_msg)
+            return {"error": error_msg}
 
     def detect_form_type(self, text: str) -> str:
         """Detect USCIS form type from extracted text"""
