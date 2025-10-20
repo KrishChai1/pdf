@@ -16,7 +16,19 @@ try:
     DOCLING_AVAILABLE = True
 except ImportError:
     DOCLING_AVAILABLE = False
-    st.error("Docling not installed. Please install with: pip install docling")
+
+# Fallback PDF extraction
+try:
+    import PyPDF2
+    PYPDF2_AVAILABLE = True
+except ImportError:
+    PYPDF2_AVAILABLE = False
+
+try:
+    import fitz  # PyMuPDF
+    PYMUPDF_AVAILABLE = True
+except ImportError:
+    PYMUPDF_AVAILABLE = False
 
 @dataclass
 class ExtractedField:
@@ -100,39 +112,103 @@ class USCISFormExtractor:
                 tmp_file_path = tmp_file.name
             
             try:
-                # Initialize DocumentConverter with PDF pipeline options
-                pipeline_options = PdfPipelineOptions()
-                pipeline_options.do_ocr = True
-                pipeline_options.do_table_structure = True
-                
-                converter = DocumentConverter(
-                    format_options={
-                        InputFormat.PDF: pipeline_options,
-                    }
-                )
-                
-                # Convert the PDF using the file path
-                result = converter.convert(Path(tmp_file_path))
+                # Try different Docling initialization approaches
+                try:
+                    # Method 1: Simple DocumentConverter (most compatible)
+                    converter = DocumentConverter()
+                    result = converter.convert(Path(tmp_file_path))
+                    
+                except Exception as simple_error:
+                    self.debug_info.append(f"Simple converter failed: {str(simple_error)}")
+                    
+                    # Method 2: Try with pipeline options (newer versions)
+                    try:
+                        pipeline_options = PdfPipelineOptions()
+                        pipeline_options.do_ocr = True
+                        pipeline_options.do_table_structure = True
+                        
+                        converter = DocumentConverter(
+                            format_options={
+                                InputFormat.PDF: pipeline_options,
+                            }
+                        )
+                        result = converter.convert(Path(tmp_file_path))
+                        
+                    except Exception as pipeline_error:
+                        self.debug_info.append(f"Pipeline converter failed: {str(pipeline_error)}")
+                        
+                        # Method 3: Basic converter with minimal options
+                        try:
+                            from docling.datamodel.pipeline_options import PdfPipelineOptions
+                            pipeline_options = PdfPipelineOptions()
+                            # Only set basic options that are likely to exist
+                            if hasattr(pipeline_options, 'do_ocr'):
+                                pipeline_options.do_ocr = True
+                            if hasattr(pipeline_options, 'do_table_structure'):
+                                pipeline_options.do_table_structure = True
+                            
+                            converter = DocumentConverter()
+                            result = converter.convert(Path(tmp_file_path))
+                            
+                        except Exception as basic_error:
+                            self.debug_info.append(f"Basic converter failed: {str(basic_error)}")
+                            raise basic_error
                 
                 # Extract structured content
                 content = {
-                    "text": result.document.export_to_text(),
-                    "markdown": result.document.export_to_markdown(),
+                    "text": "",
+                    "markdown": "",
                     "tables": [],
                     "fields": []
                 }
                 
-                # Extract tables if any
-                if hasattr(result.document, 'tables') and result.document.tables:
-                    for table in result.document.tables:
-                        try:
-                            table_data = {
-                                "data": table.export_to_dataframe().to_dict(),
-                                "bbox": table.bbox if hasattr(table, 'bbox') else None
-                            }
-                            content["tables"].append(table_data)
-                        except Exception as table_error:
-                            self.debug_info.append(f"Error extracting table: {str(table_error)}")
+                # Safely extract text
+                try:
+                    content["text"] = result.document.export_to_text()
+                except Exception as e:
+                    self.debug_info.append(f"Text extraction failed: {str(e)}")
+                    # Try alternative text extraction
+                    try:
+                        content["text"] = str(result.document)
+                    except:
+                        content["text"] = "Text extraction failed"
+                
+                # Safely extract markdown
+                try:
+                    content["markdown"] = result.document.export_to_markdown()
+                except Exception as e:
+                    self.debug_info.append(f"Markdown extraction failed: {str(e)}")
+                    content["markdown"] = content["text"]  # Fallback to text
+                
+                # Safely extract tables
+                try:
+                    if hasattr(result.document, 'tables') and result.document.tables:
+                        for i, table in enumerate(result.document.tables):
+                            try:
+                                # Try different table extraction methods
+                                table_data = {}
+                                
+                                # Method 1: DataFrame export
+                                try:
+                                    df = table.export_to_dataframe()
+                                    table_data["data"] = df.to_dict()
+                                except Exception:
+                                    # Method 2: Direct data access
+                                    try:
+                                        table_data["data"] = table.data if hasattr(table, 'data') else {}
+                                    except Exception:
+                                        table_data["data"] = {"error": "Table data extraction failed"}
+                                
+                                # Add bounding box if available
+                                if hasattr(table, 'bbox'):
+                                    table_data["bbox"] = table.bbox
+                                
+                                content["tables"].append(table_data)
+                                
+                            except Exception as table_error:
+                                self.debug_info.append(f"Error extracting table {i}: {str(table_error)}")
+                except Exception as tables_error:
+                    self.debug_info.append(f"Tables extraction failed: {str(tables_error)}")
                 
                 return content
                 
@@ -224,7 +300,66 @@ class USCISFormExtractor:
                 item_counter += 1
                 self.debug_info.append(f"Extracted item {item_num}: {label}")
         
-        return extracted_fields
+    def extract_with_fallback(self, pdf_file) -> Dict[str, Any]:
+        """Fallback PDF extraction using PyPDF2 or PyMuPDF"""
+        try:
+            pdf_content = pdf_file.getvalue()
+            
+            # Try PyMuPDF first (better for complex PDFs)
+            if PYMUPDF_AVAILABLE:
+                try:
+                    doc = fitz.open(stream=pdf_content, filetype="pdf")
+                    text = ""
+                    for page in doc:
+                        text += page.get_text() + "\n"
+                    doc.close()
+                    
+                    return {
+                        "text": text,
+                        "markdown": text,  # Simple conversion
+                        "tables": [],
+                        "fields": []
+                    }
+                except Exception as e:
+                    self.debug_info.append(f"PyMuPDF failed: {str(e)}")
+            
+            # Try PyPDF2 as backup
+            if PYPDF2_AVAILABLE:
+                try:
+                    from io import BytesIO
+                    pdf_reader = PyPDF2.PdfReader(BytesIO(pdf_content))
+                    text = ""
+                    for page in pdf_reader.pages:
+                        text += page.extract_text() + "\n"
+                    
+                    return {
+                        "text": text,
+                        "markdown": text,
+                        "tables": [],
+                        "fields": []
+                    }
+                except Exception as e:
+                    self.debug_info.append(f"PyPDF2 failed: {str(e)}")
+            
+            return {"error": "No PDF extraction library available"}
+            
+        except Exception as e:
+            return {"error": f"Fallback extraction failed: {str(e)}"}
+
+    def extract_pdf_content(self, pdf_file) -> Dict[str, Any]:
+        """Main extraction method with fallback options"""
+        # Try Docling first (best quality)
+        if DOCLING_AVAILABLE:
+            self.debug_info.append("Attempting extraction with Docling...")
+            result = self.extract_with_docling(pdf_file)
+            if "error" not in result:
+                return result
+            else:
+                self.debug_info.append(f"Docling failed: {result['error']}")
+        
+        # Fallback to other methods
+        self.debug_info.append("Falling back to alternative PDF extraction...")
+        return self.extract_with_fallback(pdf_file)
 
     def should_create_subfields(self, label: str) -> bool:
         """Determine if a field should have subfields"""
@@ -301,9 +436,30 @@ def main():
     st.title("🏛️ USCIS PDF Form Extractor with Docling")
     st.markdown("Extract and analyze USCIS forms with advanced PDF processing")
     
-    if not DOCLING_AVAILABLE:
-        st.error("⚠️ Docling library not found. Please install it:")
-        st.code("pip install docling")
+    # Check available libraries
+    libs_status = []
+    if DOCLING_AVAILABLE:
+        libs_status.append("✅ Docling (Primary)")
+    else:
+        libs_status.append("❌ Docling (install: pip install docling)")
+    
+    if PYMUPDF_AVAILABLE:
+        libs_status.append("✅ PyMuPDF (Fallback)")
+    else:
+        libs_status.append("❌ PyMuPDF (install: pip install pymupdf)")
+    
+    if PYPDF2_AVAILABLE:
+        libs_status.append("✅ PyPDF2 (Fallback)")
+    else:
+        libs_status.append("❌ PyPDF2 (install: pip install PyPDF2)")
+    
+    with st.expander("📚 Library Status"):
+        for status in libs_status:
+            st.markdown(status)
+    
+    if not any([DOCLING_AVAILABLE, PYMUPDF_AVAILABLE, PYPDF2_AVAILABLE]):
+        st.error("⚠️ No PDF extraction libraries found. Please install at least one:")
+        st.code("pip install docling  # Recommended\n# OR\npip install pymupdf\n# OR\npip install PyPDF2")
         return
     
     # Initialize extractor
@@ -333,7 +489,7 @@ def main():
         
         # Process the PDF
         with st.spinner("🔄 Processing PDF with Docling..."):
-            content = extractor.extract_with_docling(uploaded_file)
+            content = extractor.extract_pdf_content(uploaded_file)
         
         if "error" in content:
             st.error(f"❌ Error processing PDF: {content['error']}")
