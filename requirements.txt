@@ -1,7 +1,13 @@
 # Core dependencies for USCIS PDF Extractor with Docling
 streamlit>=1.28.0
-docling>=1.0.0
 pandas>=1.5.0
+
+# Primary PDF extraction (recommended)
+docling>=1.0.0
+
+# Fallback PDF extraction libraries
+pymupdf>=1.23.0
+PyPDF2>=3.0.0
 
 # Additional dependencies that may be required by docling
 pypdfium2>=4.0.0
@@ -13,10 +19,6 @@ python-dotenv>=1.0.0
 # Optional but recommended for better performance
 numpy>=1.24.0
 pillow>=9.0.0
-
-# For enhanced PDF processing (if needed)
-pymupdf>=1.23.0
-fitz>=0.0.1.dev2
 
 # For data handling and export
 openpyxl>=3.1.0
